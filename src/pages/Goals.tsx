@@ -490,13 +490,13 @@ function NewGoalForm({ onSubmit, onCancel, recentActivities }: {
   const displayPace = lastEdited === 'time' ? calculatedPace : (parseInt(paceMinutes || '0') * 60) + parseInt(paceSeconds || '0')
 
   // Current fitness for this type
-  const currentAvgPace = useMemo(() => {
+  const currentFitness = useMemo(() => {
     const relevant = recentActivities
       .filter(a => a.type === eventType && a.average_speed > 0 && a.distance > 0)
       .slice(0, 10)
     if (relevant.length === 0) return null
     const avgSpeed = relevant.reduce((s, a) => s + a.average_speed, 0) / relevant.length
-    return speedToPace(avgSpeed)
+    return { pace: speedToPace(avgSpeed), count: relevant.length }
   }, [recentActivities, eventType])
 
   function handleTimeChange(h: string, m: string, s: string) {
@@ -682,11 +682,11 @@ function NewGoalForm({ onSubmit, onCancel, recentActivities }: {
       </div>
 
       {/* Current fitness hint */}
-      {currentAvgPace && (
+      {currentFitness && (
         <div className="bg-bg-primary rounded-lg px-4 py-3 flex items-center gap-3">
           <TrendingUp size={14} className="text-accent shrink-0" />
           <p className="text-xs text-text-secondary">
-            Your recent average {eventType.toLowerCase()} pace: <span className="text-text-primary font-mono font-medium">{paceToString(currentAvgPace)}/km</span>
+            Your average pace across your last {currentFitness.count} {eventType.toLowerCase()}{currentFitness.count > 1 ? 's' : ''}: <span className="text-text-primary font-mono font-medium">{paceToString(currentFitness.pace)}/km</span>
           </p>
         </div>
       )}
