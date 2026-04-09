@@ -520,18 +520,21 @@ async function handleGeneratePlan(goalId: string) {
     }).join('\n')
 
     const weeksUntil = Math.max(1, Math.ceil((new Date(goal.target_date).getTime() - Date.now()) / (7 * 24 * 60 * 60 * 1000)))
-    const targetDurMin = Math.round(goal.target_time / 60)
     const targetDurH = Math.floor(goal.target_time / 3600)
     const targetDurM = Math.round((goal.target_time % 3600) / 60)
-    const targetTimeStr = targetDurH > 0 ? `${targetDurH}h ${targetDurM}min` : `${targetDurMin}min`
+    const targetTimeStr = targetDurH > 0 ? `${targetDurH}h ${targetDurM}min` : `${targetDurM}min`
+    const distKm = goal.target_distance ? (goal.target_distance / 1000).toFixed(1) : 'N/A'
+    const targetPaceStr = goal.target_pace ? `${Math.floor(goal.target_pace / 60)}:${String(Math.round(goal.target_pace % 60)).padStart(2, '0')}/km` : 'N/A'
 
     const prompt = `You are an expert running and endurance coach. Generate a training plan for the following goal.
 
 GOAL:
 - Event: ${goal.event_name}
 - Type: ${goal.event_type}
+- Distance: ${distKm} km
 - Target date: ${goal.target_date} (${weeksUntil} weeks away)
 - Target time: ${targetTimeStr}
+- Target pace: ${targetPaceStr}
 
 ATHLETE'S RECENT ACTIVITY (last 60 days):
 ${activitySummary || 'No recent activities recorded.'}

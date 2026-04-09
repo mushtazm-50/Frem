@@ -160,7 +160,9 @@ export const mockGoals: Goal[] = [
     event_type: 'Run',
     event_name: 'Copenhagen Half Marathon',
     target_date: '2026-05-17',
+    target_distance: 21097.5,
     target_time: 5400, // 1:30:00
+    target_pace: 256, // 4:16/km
     status: 'active',
     training_plan: [
       {
@@ -224,7 +226,9 @@ export const mockGoals: Goal[] = [
     event_type: 'Ride',
     event_name: 'Century Ride Challenge',
     target_date: '2026-06-20',
+    target_distance: 160934, // 100 miles
     target_time: 18000, // 5:00:00
+    target_pace: 112, // ~1:52/km
     status: 'active',
     training_plan: null,
     created_at: '2026-03-15T10:00:00Z',

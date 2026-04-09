@@ -32,7 +32,9 @@ export interface Goal {
   event_type: ActivityType
   event_name: string
   target_date: string
+  target_distance: number // meters
   target_time: number // seconds
+  target_pace: number // seconds per km
   status: 'active' | 'completed' | 'cancelled'
   training_plan: TrainingWeek[] | null
   created_at: string
