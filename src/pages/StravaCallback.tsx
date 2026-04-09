@@ -6,6 +6,7 @@ export function StravaCallback() {
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
   const [error, setError] = useState<string | null>(null)
+  const [status, setStatus] = useState('Connecting Strava...')
 
   useEffect(() => {
     const code = searchParams.get('code')
@@ -14,12 +15,24 @@ export function StravaCallback() {
       return
     }
 
-    async function exchangeCode() {
+    async function exchangeAndSync() {
       try {
-        const { error } = await supabase.functions.invoke('strava-webhook', {
+        // Exchange token
+        const { data, error } = await supabase.functions.invoke('strava-webhook', {
           body: { action: 'exchange_token', code },
         })
         if (error) throw error
+
+        // Trigger historical sync
+        if (data?.strava_athlete_id) {
+          setStatus('Importing your activity history (1 year)...')
+          const { data: syncData, error: syncError } = await supabase.functions.invoke('strava-webhook', {
+            body: { action: 'sync_history', strava_athlete_id: data.strava_athlete_id },
+          })
+          if (syncError) console.error('Sync error:', syncError)
+          else console.log(`Imported ${syncData?.imported} activities`)
+        }
+
         navigate('/settings', { replace: true })
       } catch (err) {
         setError('Failed to connect Strava. Please try again.')
@@ -27,7 +40,7 @@ export function StravaCallback() {
       }
     }
 
-    exchangeCode()
+    exchangeAndSync()
   }, [searchParams, navigate])
 
   return (
@@ -45,7 +58,7 @@ export function StravaCallback() {
       ) : (
         <div className="text-center space-y-3">
           <div className="w-6 h-6 border-2 border-accent border-t-transparent rounded-full animate-spin mx-auto" />
-          <p className="text-text-secondary text-sm">Connecting Strava...</p>
+          <p className="text-text-secondary text-sm">{status}</p>
         </div>
       )}
     </div>

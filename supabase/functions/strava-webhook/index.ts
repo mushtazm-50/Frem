@@ -3,17 +3,17 @@
 // 1. Strava webhook verification (GET)
 // 2. Strava webhook events (POST) — new activity created
 // 3. Strava OAuth token exchange (POST with action: 'exchange_token')
+// 4. Historical import (POST with action: 'sync_history')
+// 5. Disconnect Strava (POST with action: 'disconnect')
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
-// Required for all operations
 const STRAVA_CLIENT_ID = Deno.env.get('STRAVA_CLIENT_ID') || ''
 const STRAVA_CLIENT_SECRET = Deno.env.get('STRAVA_CLIENT_SECRET') || ''
 const STRAVA_VERIFY_TOKEN = Deno.env.get('STRAVA_VERIFY_TOKEN') || ''
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 
-// Only needed for activity processing (not token exchange)
 const CLAUDE_API_KEY = Deno.env.get('CLAUDE_API_KEY') || ''
 const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
 const TELEGRAM_CHAT_ID = Deno.env.get('TELEGRAM_CHAT_ID') || ''
@@ -27,8 +27,14 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
 }
 
+function jsonResponse(data: unknown, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  })
+}
+
 Deno.serve(async (req: Request) => {
-  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders })
   }
@@ -41,9 +47,7 @@ Deno.serve(async (req: Request) => {
     const challenge = url.searchParams.get('hub.challenge')
 
     if (mode === 'subscribe' && token === STRAVA_VERIFY_TOKEN) {
-      return new Response(JSON.stringify({ 'hub.challenge': challenge }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
+      return jsonResponse({ 'hub.challenge': challenge })
     }
     return new Response('Forbidden', { status: 403, headers: corsHeaders })
   }
@@ -51,12 +55,19 @@ Deno.serve(async (req: Request) => {
   // POST requests
   const body = await req.json()
 
-  // Token exchange from frontend
   if (body.action === 'exchange_token') {
     return handleTokenExchange(body.code)
   }
 
-  // Strava webhook event
+  if (body.action === 'sync_history') {
+    return handleSyncHistory(body.strava_athlete_id)
+  }
+
+  if (body.action === 'disconnect') {
+    return handleDisconnect(body.strava_athlete_id)
+  }
+
+  // Strava webhook event — new activity
   if (body.object_type === 'activity' && body.aspect_type === 'create') {
     return handleNewActivity(body.object_id, body.owner_id)
   }
@@ -64,9 +75,9 @@ Deno.serve(async (req: Request) => {
   return new Response('OK', { status: 200, headers: corsHeaders })
 })
 
+// --- Token Exchange ---
 async function handleTokenExchange(code: string) {
   try {
-    console.log('Token exchange starting, client_id:', STRAVA_CLIENT_ID)
     const res = await fetch('https://www.strava.com/oauth/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -78,17 +89,12 @@ async function handleTokenExchange(code: string) {
       }),
     })
     const tokens = await res.json()
-    console.log('Strava token response status:', res.status, 'has athlete:', !!tokens.athlete)
 
     if (!res.ok || !tokens.athlete) {
       console.error('Strava token error:', JSON.stringify(tokens))
-      return new Response(JSON.stringify({ error: 'Strava token exchange failed', details: tokens }), {
-        status: 400,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      })
+      return jsonResponse({ error: 'Strava token exchange failed', details: tokens }, 400)
     }
 
-    // Store tokens in Supabase
     const { error: dbError } = await supabase.from('strava_tokens').upsert({
       strava_athlete_id: tokens.athlete.id,
       access_token: tokens.access_token,
@@ -97,56 +103,132 @@ async function handleTokenExchange(code: string) {
     })
     if (dbError) console.error('DB upsert error:', dbError)
 
-    return new Response(JSON.stringify({ success: true }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    })
+    return jsonResponse({ success: true, strava_athlete_id: tokens.athlete.id })
   } catch (err) {
-    return new Response(JSON.stringify({ error: (err as Error).message }), {
-      status: 500,
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-    })
-
+    console.error('Token exchange error:', err)
+    return jsonResponse({ error: (err as Error).message }, 500)
   }
 }
 
+// --- Disconnect Strava ---
+async function handleDisconnect(stravaAthleteId: number) {
+  try {
+    // Revoke Strava access
+    const accessToken = await getAccessToken(stravaAthleteId)
+    await fetch(`https://www.strava.com/oauth/deauthorize?access_token=${accessToken}`, {
+      method: 'POST',
+    })
+
+    // Delete tokens
+    await supabase.from('strava_tokens').delete().eq('strava_athlete_id', stravaAthleteId)
+
+    // Delete all activities for this user
+    await supabase.from('activities').delete().eq('user_id', stravaAthleteId.toString())
+
+    return jsonResponse({ success: true })
+  } catch (err) {
+    console.error('Disconnect error:', err)
+    // Still try to clean up locally even if revoke fails
+    await supabase.from('strava_tokens').delete().eq('strava_athlete_id', stravaAthleteId)
+    await supabase.from('activities').delete().eq('user_id', stravaAthleteId.toString())
+    return jsonResponse({ success: true })
+  }
+}
+
+// --- Historical Sync (1 year) ---
+async function handleSyncHistory(stravaAthleteId: number) {
+  try {
+    const accessToken = await getAccessToken(stravaAthleteId)
+    const oneYearAgo = Math.floor(Date.now() / 1000) - (365 * 24 * 60 * 60)
+    let page = 1
+    let totalImported = 0
+    const perPage = 100
+
+    while (true) {
+      console.log(`Fetching activities page ${page}...`)
+      const res = await fetch(
+        `https://www.strava.com/api/v3/athlete/activities?after=${oneYearAgo}&page=${page}&per_page=${perPage}`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      )
+
+      if (!res.ok) {
+        console.error('Strava API error:', res.status, await res.text())
+        break
+      }
+
+      const activities = await res.json()
+      if (!activities || activities.length === 0) break
+
+      // Fetch full details and store each activity
+      for (const summary of activities) {
+        try {
+          // Check if already exists
+          const { data: existing } = await supabase
+            .from('activities')
+            .select('id')
+            .eq('strava_id', summary.id)
+            .maybeSingle()
+
+          if (existing) continue
+
+          // Fetch full activity details
+          const detailRes = await fetch(
+            `https://www.strava.com/api/v3/activities/${summary.id}`,
+            { headers: { Authorization: `Bearer ${accessToken}` } }
+          )
+          const activity = await detailRes.json()
+
+          const record = buildActivityRecord(activity, stravaAthleteId)
+          const { error } = await supabase.from('activities').insert(record)
+          if (error) {
+            console.error(`Failed to insert activity ${summary.id}:`, error)
+          } else {
+            totalImported++
+          }
+
+          // Small delay to respect Strava rate limits (600 req / 15 min)
+          await new Promise(r => setTimeout(r, 200))
+        } catch (err) {
+          console.error(`Error processing activity ${summary.id}:`, err)
+        }
+      }
+
+      if (activities.length < perPage) break
+      page++
+    }
+
+    console.log(`Historical sync complete: ${totalImported} activities imported`)
+    return jsonResponse({ success: true, imported: totalImported })
+  } catch (err) {
+    console.error('Sync history error:', err)
+    return jsonResponse({ error: (err as Error).message }, 500)
+  }
+}
+
+// --- New Activity (webhook) ---
 async function handleNewActivity(activityId: number, ownerId: number) {
   try {
-    // Get fresh access token
     const accessToken = await getAccessToken(ownerId)
 
-    // Fetch full activity data from Strava
     const activityRes = await fetch(
       `https://www.strava.com/api/v3/activities/${activityId}`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     )
     const activity = await activityRes.json()
 
-    // Generate AI analysis
-    const analysis = await generateAnalysis(activity)
+    // Skip if already exists
+    const { data: existing } = await supabase
+      .from('activities')
+      .select('id')
+      .eq('strava_id', activityId)
+      .maybeSingle()
+    if (existing) return new Response('OK', { status: 200, headers: corsHeaders })
 
-    // Store in database
-    const record = {
-      strava_id: activity.id,
-      user_id: ownerId.toString(),
-      name: activity.name,
-      type: activity.type,
-      sport_type: activity.sport_type,
-      start_date: activity.start_date,
-      elapsed_time: activity.elapsed_time,
-      moving_time: activity.moving_time,
-      distance: activity.distance,
-      total_elevation_gain: activity.total_elevation_gain,
-      average_speed: activity.average_speed,
-      max_speed: activity.max_speed,
-      average_heartrate: activity.average_heartrate || null,
-      max_heartrate: activity.max_heartrate || null,
-      calories: activity.calories || null,
-      suffer_score: activity.suffer_score || null,
-      average_cadence: activity.average_cadence || null,
-      average_watts: activity.average_watts || null,
-      map_polyline: activity.map?.summary_polyline || null,
-      ai_analysis: analysis,
-      raw_data: activity,
+    const record = buildActivityRecord(activity, ownerId)
+
+    // Generate AI analysis if API key is set
+    if (CLAUDE_API_KEY) {
+      record.ai_analysis = await generateAnalysis(activity)
     }
 
     const { data: inserted } = await supabase
@@ -155,15 +237,43 @@ async function handleNewActivity(activityId: number, ownerId: number) {
       .select('id')
       .single()
 
-    // Send Telegram notification
-    if (inserted) {
-      await sendTelegramNotification(activity, analysis, inserted.id)
+    // Send Telegram notification if configured
+    if (inserted && TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) {
+      await sendTelegramNotification(activity, record.ai_analysis || '', inserted.id)
     }
 
     return new Response('OK', { status: 200, headers: corsHeaders })
   } catch (err) {
     console.error('Error processing activity:', err)
     return new Response('Error', { status: 500, headers: corsHeaders })
+  }
+}
+
+// --- Helpers ---
+
+function buildActivityRecord(activity: Record<string, unknown>, ownerId: number) {
+  return {
+    strava_id: activity.id as number,
+    user_id: ownerId.toString(),
+    name: (activity.name as string) || 'Untitled',
+    type: (activity.type as string) || 'Workout',
+    sport_type: (activity.sport_type as string) || '',
+    start_date: activity.start_date as string,
+    elapsed_time: (activity.elapsed_time as number) || 0,
+    moving_time: (activity.moving_time as number) || 0,
+    distance: (activity.distance as number) || 0,
+    total_elevation_gain: (activity.total_elevation_gain as number) || 0,
+    average_speed: (activity.average_speed as number) || 0,
+    max_speed: (activity.max_speed as number) || 0,
+    average_heartrate: (activity.average_heartrate as number) || null,
+    max_heartrate: (activity.max_heartrate as number) || null,
+    calories: (activity.calories as number) || null,
+    suffer_score: (activity.suffer_score as number) || null,
+    average_cadence: (activity.average_cadence as number) || null,
+    average_watts: (activity.average_watts as number) || null,
+    map_polyline: (activity.map as Record<string, unknown>)?.summary_polyline as string || null,
+    ai_analysis: null as string | null,
+    raw_data: activity,
   }
 }
 
@@ -176,11 +286,10 @@ async function getAccessToken(stravaAthleteId: number): Promise<string> {
 
   if (!tokens) throw new Error('No tokens found for athlete')
 
-  // Refresh if expired
   if (tokens.expires_at < Math.floor(Date.now() / 1000)) {
     const res = await fetch('https://www.strava.com/oauth/token', {
       method: 'POST',
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         client_id: STRAVA_CLIENT_ID,
         client_secret: STRAVA_CLIENT_SECRET,
@@ -253,8 +362,6 @@ async function sendTelegramNotification(
   const distanceKm = ((activity.distance as number) / 1000).toFixed(2)
   const durationMin = Math.round((activity.moving_time as number) / 60)
   const activityUrl = `${FREM_BASE_URL}/activity/${fremActivityId}`
-
-  // Truncate analysis for Telegram (keep first ~500 chars)
   const shortAnalysis = analysis.length > 500 ? analysis.slice(0, 500) + '...' : analysis
 
   const text = `🏃 *${activity.name}*
@@ -266,7 +373,7 @@ ${shortAnalysis}
 
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST',
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       chat_id: TELEGRAM_CHAT_ID,
       text,

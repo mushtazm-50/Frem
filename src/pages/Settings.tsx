@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Link2, CheckCircle } from 'lucide-react'
+import { Link2, CheckCircle, Unlink, RefreshCw } from 'lucide-react'
 import { getStravaAuthUrl } from '../lib/strava'
 import { useAuth } from '../hooks/useAuth'
 import { supabase } from '../lib/supabase'
@@ -7,16 +7,56 @@ import { supabase } from '../lib/supabase'
 export function Settings() {
   const { user } = useAuth()
   const [stravaConnected, setStravaConnected] = useState(false)
+  const [stravaAthleteId, setStravaAthleteId] = useState<number | null>(null)
   const [checking, setChecking] = useState(true)
+  const [syncing, setSyncing] = useState(false)
+  const [syncResult, setSyncResult] = useState<string | null>(null)
+  const [disconnecting, setDisconnecting] = useState(false)
 
   useEffect(() => {
-    async function checkStrava() {
-      const { data } = await supabase.from('strava_tokens').select('strava_athlete_id').limit(1)
-      setStravaConnected(!!data && data.length > 0)
-      setChecking(false)
-    }
     checkStrava()
   }, [])
+
+  async function checkStrava() {
+    const { data } = await supabase.from('strava_tokens').select('strava_athlete_id').limit(1)
+    const connected = !!data && data.length > 0
+    setStravaConnected(connected)
+    if (connected && data) setStravaAthleteId(data[0].strava_athlete_id)
+    setChecking(false)
+  }
+
+  async function handleSyncHistory() {
+    if (!stravaAthleteId) return
+    setSyncing(true)
+    setSyncResult(null)
+    try {
+      const { data, error } = await supabase.functions.invoke('strava-webhook', {
+        body: { action: 'sync_history', strava_athlete_id: stravaAthleteId },
+      })
+      if (error) throw error
+      setSyncResult(`Imported ${data.imported} activities`)
+    } catch (err) {
+      console.error(err)
+      setSyncResult('Sync failed. Please try again.')
+    }
+    setSyncing(false)
+  }
+
+  async function handleDisconnect() {
+    if (!stravaAthleteId || !confirm('Disconnect Strava? This will remove all synced activities.')) return
+    setDisconnecting(true)
+    try {
+      await supabase.functions.invoke('strava-webhook', {
+        body: { action: 'disconnect', strava_athlete_id: stravaAthleteId },
+      })
+      setStravaConnected(false)
+      setStravaAthleteId(null)
+      setSyncResult(null)
+    } catch (err) {
+      console.error(err)
+    }
+    setDisconnecting(false)
+  }
 
   return (
     <div className="space-y-8">
@@ -58,9 +98,11 @@ export function Settings() {
           {checking ? (
             <div className="w-5 h-5 border-2 border-text-tertiary border-t-transparent rounded-full animate-spin" />
           ) : stravaConnected ? (
-            <div className="flex items-center gap-1.5 text-success text-sm">
-              <CheckCircle size={16} />
-              Connected
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-1.5 text-success text-sm">
+                <CheckCircle size={16} />
+                Connected
+              </div>
             </div>
           ) : (
             <a
@@ -72,6 +114,32 @@ export function Settings() {
             </a>
           )}
         </div>
+
+        {stravaConnected && (
+          <div className="mt-5 pt-5 border-t border-border-subtle flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleSyncHistory}
+                disabled={syncing}
+                className="inline-flex items-center gap-2 px-3 py-2 bg-bg-primary hover:bg-bg-surface-hover border border-border-subtle rounded-lg text-sm text-text-secondary hover:text-text-primary transition-colors disabled:opacity-50"
+              >
+                <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} />
+                {syncing ? 'Syncing...' : 'Import History (1 year)'}
+              </button>
+              {syncResult && (
+                <span className="text-xs text-text-tertiary">{syncResult}</span>
+              )}
+            </div>
+            <button
+              onClick={handleDisconnect}
+              disabled={disconnecting}
+              className="inline-flex items-center gap-2 px-3 py-2 text-sm text-error/70 hover:text-error hover:bg-error/5 rounded-lg transition-colors disabled:opacity-50"
+            >
+              <Unlink size={14} />
+              {disconnecting ? 'Disconnecting...' : 'Disconnect'}
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="text-center py-4">
