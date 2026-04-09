@@ -1,11 +1,22 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Link2, CheckCircle } from 'lucide-react'
 import { getStravaAuthUrl } from '../lib/strava'
 import { useAuth } from '../hooks/useAuth'
+import { supabase } from '../lib/supabase'
 
 export function Settings() {
   const { user } = useAuth()
-  const [stravaConnected] = useState(false) // Will be read from DB when live
+  const [stravaConnected, setStravaConnected] = useState(false)
+  const [checking, setChecking] = useState(true)
+
+  useEffect(() => {
+    async function checkStrava() {
+      const { data } = await supabase.from('strava_tokens').select('strava_athlete_id').limit(1)
+      setStravaConnected(!!data && data.length > 0)
+      setChecking(false)
+    }
+    checkStrava()
+  }, [])
 
   return (
     <div className="space-y-8">
@@ -44,7 +55,9 @@ export function Settings() {
               </p>
             </div>
           </div>
-          {stravaConnected ? (
+          {checking ? (
+            <div className="w-5 h-5 border-2 border-text-tertiary border-t-transparent rounded-full animate-spin" />
+          ) : stravaConnected ? (
             <div className="flex items-center gap-1.5 text-success text-sm">
               <CheckCircle size={16} />
               Connected
@@ -58,23 +71,6 @@ export function Settings() {
               Connect Strava
             </a>
           )}
-        </div>
-      </div>
-
-      {/* Strava Callback Handler Info */}
-      <div className="bg-bg-surface rounded-xl p-6 border border-border-subtle">
-        <h2 className="text-base font-semibold mb-3">Setup Guide</h2>
-        <div className="space-y-3 text-sm text-text-secondary">
-          <p>To complete the Strava integration:</p>
-          <ol className="list-decimal pl-5 space-y-2">
-            <li>Create a Strava API Application at <span className="text-accent">strava.com/settings/api</span></li>
-            <li>Set the callback domain to your deployment URL</li>
-            <li>Add your Client ID and Secret to the Supabase Edge Function environment</li>
-            <li>Register the webhook subscription with Strava</li>
-          </ol>
-          <p className="text-text-tertiary text-xs mt-3">
-            See README.md for full setup instructions.
-          </p>
         </div>
       </div>
 
