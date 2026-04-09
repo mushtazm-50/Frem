@@ -85,7 +85,12 @@ export function Dashboard() {
 
       {/* Recent Activities */}
       <div>
-        <h2 className="text-lg font-semibold mb-4">Recent Activities</h2>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold">Recent Activities</h2>
+          <Link to="/activities" className="text-sm text-accent hover:underline">
+            View all
+          </Link>
+        </div>
         <div className="space-y-2">
           {activities.slice(0, 8).map(activity => (
             <Link

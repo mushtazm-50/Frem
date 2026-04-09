@@ -1,9 +1,10 @@
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Target, Settings, LogOut } from 'lucide-react'
+import { LayoutDashboard, Activity, Target, Settings, LogOut } from 'lucide-react'
 import { useAuth } from '../hooks/useAuth'
 
 const navItems = [
   { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
+  { to: '/activities', icon: Activity, label: 'Activities' },
   { to: '/goals', icon: Target, label: 'Goals' },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ]

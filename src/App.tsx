@@ -3,6 +3,7 @@ import { Layout } from './components/Layout'
 import { ProtectedRoute } from './components/ProtectedRoute'
 import { Dashboard } from './pages/Dashboard'
 import { ActivityDetail } from './pages/ActivityDetail'
+import { Activities } from './pages/Activities'
 import { Goals } from './pages/Goals'
 import { Settings } from './pages/Settings'
 import { StravaCallback } from './pages/StravaCallback'
@@ -20,6 +21,7 @@ export default function App() {
           }
         >
           <Route path="/" element={<Dashboard />} />
+          <Route path="/activities" element={<Activities />} />
           <Route path="/activity/:id" element={<ActivityDetail />} />
           <Route path="/goals" element={<Goals />} />
           <Route path="/settings" element={<Settings />} />
