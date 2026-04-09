@@ -144,58 +144,79 @@ async function handleSyncHistory(stravaAthleteId: number) {
     let totalImported = 0
     const perPage = 100
 
+    // First pass: count total activities
+    const allSummaries: Record<string, unknown>[] = []
     while (true) {
-      console.log(`Fetching activities page ${page}...`)
       const res = await fetch(
         `https://www.strava.com/api/v3/athlete/activities?after=${oneYearAgo}&page=${page}&per_page=${perPage}`,
         { headers: { Authorization: `Bearer ${accessToken}` } }
       )
-
-      if (!res.ok) {
-        console.error('Strava API error:', res.status, await res.text())
-        break
-      }
-
-      const activities = await res.json()
-      if (!activities || activities.length === 0) break
-
-      // Fetch full details and store each activity
-      for (const summary of activities) {
-        try {
-          // Check if already exists
-          const { data: existing } = await supabase
-            .from('activities')
-            .select('id')
-            .eq('strava_id', summary.id)
-            .maybeSingle()
-
-          if (existing) continue
-
-          // Fetch full activity details
-          const detailRes = await fetch(
-            `https://www.strava.com/api/v3/activities/${summary.id}`,
-            { headers: { Authorization: `Bearer ${accessToken}` } }
-          )
-          const activity = await detailRes.json()
-
-          const record = buildActivityRecord(activity, stravaAthleteId)
-          const { error } = await supabase.from('activities').insert(record)
-          if (error) {
-            console.error(`Failed to insert activity ${summary.id}:`, error)
-          } else {
-            totalImported++
-          }
-
-          // Small delay to respect Strava rate limits (600 req / 15 min)
-          await new Promise(r => setTimeout(r, 200))
-        } catch (err) {
-          console.error(`Error processing activity ${summary.id}:`, err)
-        }
-      }
-
-      if (activities.length < perPage) break
+      if (!res.ok) break
+      const batch = await res.json()
+      if (!batch || batch.length === 0) break
+      allSummaries.push(...batch)
+      if (batch.length < perPage) break
       page++
     }
+
+    // Initialize progress
+    await supabase.from('sync_status').upsert({
+      strava_athlete_id: stravaAthleteId,
+      status: 'syncing',
+      total: allSummaries.length,
+      imported: 0,
+      updated_at: new Date().toISOString(),
+    })
+
+    // Second pass: fetch details and store
+    for (const summary of allSummaries) {
+      try {
+        const { data: existing } = await supabase
+          .from('activities')
+          .select('id')
+          .eq('strava_id', summary.id as number)
+          .maybeSingle()
+
+        if (existing) {
+          totalImported++
+          await supabase.from('sync_status').update({
+            imported: totalImported,
+            updated_at: new Date().toISOString(),
+          }).eq('strava_athlete_id', stravaAthleteId)
+          continue
+        }
+
+        const detailRes = await fetch(
+          `https://www.strava.com/api/v3/activities/${summary.id}`,
+          { headers: { Authorization: `Bearer ${accessToken}` } }
+        )
+        const activity = await detailRes.json()
+
+        const record = buildActivityRecord(activity, stravaAthleteId)
+        const { error } = await supabase.from('activities').insert(record)
+        if (error) {
+          console.error(`Failed to insert activity ${summary.id}:`, error)
+        }
+
+        totalImported++
+        await supabase.from('sync_status').update({
+          imported: totalImported,
+          updated_at: new Date().toISOString(),
+        }).eq('strava_athlete_id', stravaAthleteId)
+
+        await new Promise(r => setTimeout(r, 200))
+      } catch (err) {
+        console.error(`Error processing activity ${summary.id}:`, err)
+        totalImported++
+      }
+    }
+
+    // Mark complete
+    await supabase.from('sync_status').update({
+      status: 'done',
+      imported: totalImported,
+      updated_at: new Date().toISOString(),
+    }).eq('strava_athlete_id', stravaAthleteId)
 
     console.log(`Historical sync complete: ${totalImported} activities imported`)
     return jsonResponse({ success: true, imported: totalImported })

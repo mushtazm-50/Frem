@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link2, CheckCircle, Unlink, RefreshCw } from 'lucide-react'
 import { getStravaAuthUrl } from '../lib/strava'
 import { useAuth } from '../hooks/useAuth'
@@ -10,11 +10,14 @@ export function Settings() {
   const [stravaAthleteId, setStravaAthleteId] = useState<number | null>(null)
   const [checking, setChecking] = useState(true)
   const [syncing, setSyncing] = useState(false)
+  const [syncProgress, setSyncProgress] = useState<{ total: number; imported: number } | null>(null)
   const [syncResult, setSyncResult] = useState<string | null>(null)
   const [disconnecting, setDisconnecting] = useState(false)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
     checkStrava()
+    return () => { if (pollRef.current) clearInterval(pollRef.current) }
   }, [])
 
   async function checkStrava() {
@@ -29,6 +32,20 @@ export function Settings() {
     if (!stravaAthleteId) return
     setSyncing(true)
     setSyncResult(null)
+    setSyncProgress(null)
+
+    // Start polling
+    pollRef.current = setInterval(async () => {
+      const { data: syncData } = await supabase
+        .from('sync_status')
+        .select('*')
+        .eq('strava_athlete_id', stravaAthleteId)
+        .maybeSingle()
+      if (syncData && syncData.status === 'syncing') {
+        setSyncProgress({ total: syncData.total, imported: syncData.imported })
+      }
+    }, 1500)
+
     try {
       const { data, error } = await supabase.functions.invoke('strava-webhook', {
         body: { action: 'sync_history', strava_athlete_id: stravaAthleteId },
@@ -39,6 +56,8 @@ export function Settings() {
       console.error(err)
       setSyncResult('Sync failed. Please try again.')
     }
+    if (pollRef.current) clearInterval(pollRef.current)
+    setSyncProgress(null)
     setSyncing(false)
   }
 
@@ -116,28 +135,46 @@ export function Settings() {
         </div>
 
         {stravaConnected && (
-          <div className="mt-5 pt-5 border-t border-border-subtle flex items-center justify-between">
-            <div className="flex items-center gap-3">
+          <div className="mt-5 pt-5 border-t border-border-subtle space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleSyncHistory}
+                  disabled={syncing}
+                  className="inline-flex items-center gap-2 px-3 py-2 bg-bg-primary hover:bg-bg-surface-hover border border-border-subtle rounded-lg text-sm text-text-secondary hover:text-text-primary transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} />
+                  {syncing ? 'Syncing...' : 'Import History (1 year)'}
+                </button>
+                {syncResult && !syncing && (
+                  <span className="text-xs text-text-tertiary">{syncResult}</span>
+                )}
+              </div>
               <button
-                onClick={handleSyncHistory}
-                disabled={syncing}
-                className="inline-flex items-center gap-2 px-3 py-2 bg-bg-primary hover:bg-bg-surface-hover border border-border-subtle rounded-lg text-sm text-text-secondary hover:text-text-primary transition-colors disabled:opacity-50"
+                onClick={handleDisconnect}
+                disabled={disconnecting || syncing}
+                className="inline-flex items-center gap-2 px-3 py-2 text-sm text-error/70 hover:text-error hover:bg-error/5 rounded-lg transition-colors disabled:opacity-50"
               >
-                <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} />
-                {syncing ? 'Syncing...' : 'Import History (1 year)'}
+                <Unlink size={14} />
+                {disconnecting ? 'Disconnecting...' : 'Disconnect'}
               </button>
-              {syncResult && (
-                <span className="text-xs text-text-tertiary">{syncResult}</span>
-              )}
             </div>
-            <button
-              onClick={handleDisconnect}
-              disabled={disconnecting}
-              className="inline-flex items-center gap-2 px-3 py-2 text-sm text-error/70 hover:text-error hover:bg-error/5 rounded-lg transition-colors disabled:opacity-50"
-            >
-              <Unlink size={14} />
-              {disconnecting ? 'Disconnecting...' : 'Disconnect'}
-            </button>
+            {syncing && syncProgress && syncProgress.total > 0 && (
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-text-secondary">Importing activities...</span>
+                  <span className="text-text-primary font-mono font-medium">
+                    {syncProgress.imported} / {syncProgress.total}
+                  </span>
+                </div>
+                <div className="w-full bg-bg-primary rounded-full h-1.5">
+                  <div
+                    className="bg-accent rounded-full h-1.5 transition-all duration-500"
+                    style={{ width: `${Math.round((syncProgress.imported / syncProgress.total) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
