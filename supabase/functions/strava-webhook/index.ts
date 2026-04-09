@@ -6,19 +6,33 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
-const STRAVA_CLIENT_ID = Deno.env.get('STRAVA_CLIENT_ID')!
-const STRAVA_CLIENT_SECRET = Deno.env.get('STRAVA_CLIENT_SECRET')!
-const STRAVA_VERIFY_TOKEN = Deno.env.get('STRAVA_VERIFY_TOKEN')!
-const CLAUDE_API_KEY = Deno.env.get('CLAUDE_API_KEY')!
-const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN')!
-const TELEGRAM_CHAT_ID = Deno.env.get('TELEGRAM_CHAT_ID')!
-const FREM_BASE_URL = Deno.env.get('FREM_BASE_URL')!
-const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
-const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
+// Required for all operations
+const STRAVA_CLIENT_ID = Deno.env.get('STRAVA_CLIENT_ID') || ''
+const STRAVA_CLIENT_SECRET = Deno.env.get('STRAVA_CLIENT_SECRET') || ''
+const STRAVA_VERIFY_TOKEN = Deno.env.get('STRAVA_VERIFY_TOKEN') || ''
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
+
+// Only needed for activity processing (not token exchange)
+const CLAUDE_API_KEY = Deno.env.get('CLAUDE_API_KEY') || ''
+const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
+const TELEGRAM_CHAT_ID = Deno.env.get('TELEGRAM_CHAT_ID') || ''
+const FREM_BASE_URL = Deno.env.get('FREM_BASE_URL') || ''
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+}
+
 Deno.serve(async (req: Request) => {
+  // Handle CORS preflight
+  if (req.method === 'OPTIONS') {
+    return new Response('ok', { headers: corsHeaders })
+  }
+
   // Strava webhook verification (GET)
   if (req.method === 'GET') {
     const url = new URL(req.url)
@@ -28,10 +42,10 @@ Deno.serve(async (req: Request) => {
 
     if (mode === 'subscribe' && token === STRAVA_VERIFY_TOKEN) {
       return new Response(JSON.stringify({ 'hub.challenge': challenge }), {
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       })
     }
-    return new Response('Forbidden', { status: 403 })
+    return new Response('Forbidden', { status: 403, headers: corsHeaders })
   }
 
   // POST requests
@@ -47,11 +61,12 @@ Deno.serve(async (req: Request) => {
     return handleNewActivity(body.object_id, body.owner_id)
   }
 
-  return new Response('OK', { status: 200 })
+  return new Response('OK', { status: 200, headers: corsHeaders })
 })
 
 async function handleTokenExchange(code: string) {
   try {
+    console.log('Token exchange starting, client_id:', STRAVA_CLIENT_ID)
     const res = await fetch('https://www.strava.com/oauth/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -63,23 +78,34 @@ async function handleTokenExchange(code: string) {
       }),
     })
     const tokens = await res.json()
+    console.log('Strava token response status:', res.status, 'has athlete:', !!tokens.athlete)
 
-    // Store tokens in Supabase (you'd associate with the authenticated user)
-    await supabase.from('strava_tokens').upsert({
+    if (!res.ok || !tokens.athlete) {
+      console.error('Strava token error:', JSON.stringify(tokens))
+      return new Response(JSON.stringify({ error: 'Strava token exchange failed', details: tokens }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      })
+    }
+
+    // Store tokens in Supabase
+    const { error: dbError } = await supabase.from('strava_tokens').upsert({
       strava_athlete_id: tokens.athlete.id,
       access_token: tokens.access_token,
       refresh_token: tokens.refresh_token,
       expires_at: tokens.expires_at,
     })
+    if (dbError) console.error('DB upsert error:', dbError)
 
     return new Response(JSON.stringify({ success: true }), {
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
   } catch (err) {
     return new Response(JSON.stringify({ error: (err as Error).message }), {
       status: 500,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
+
   }
 }
 
@@ -134,10 +160,10 @@ async function handleNewActivity(activityId: number, ownerId: number) {
       await sendTelegramNotification(activity, analysis, inserted.id)
     }
 
-    return new Response('OK', { status: 200 })
+    return new Response('OK', { status: 200, headers: corsHeaders })
   } catch (err) {
     console.error('Error processing activity:', err)
-    return new Response('Error', { status: 500 })
+    return new Response('Error', { status: 500, headers: corsHeaders })
   }
 }
 
@@ -154,7 +180,7 @@ async function getAccessToken(stravaAthleteId: number): Promise<string> {
   if (tokens.expires_at < Math.floor(Date.now() / 1000)) {
     const res = await fetch('https://www.strava.com/oauth/token', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         client_id: STRAVA_CLIENT_ID,
         client_secret: STRAVA_CLIENT_SECRET,
@@ -240,7 +266,7 @@ ${shortAnalysis}
 
   await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       chat_id: TELEGRAM_CHAT_ID,
       text,
