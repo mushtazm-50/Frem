@@ -195,6 +195,7 @@ async function handleSyncHistory(stravaAthleteId: number) {
     })
 
     // Second pass: fetch details and store
+    let apiCalls = 0
     for (const summary of allSummaries) {
       try {
         const { data: existing } = await supabase
@@ -216,12 +217,42 @@ async function handleSyncHistory(stravaAthleteId: number) {
           `https://www.strava.com/api/v3/activities/${summary.id}`,
           { headers: { Authorization: `Bearer ${accessToken}` } }
         )
-        const activity = await detailRes.json()
+        apiCalls++
 
-        const record = buildActivityRecord(activity, stravaAthleteId)
-        const { error } = await supabase.from('activities').insert(record)
-        if (error) {
-          console.error(`Failed to insert activity ${summary.id}:`, error)
+        // Handle rate limiting — if 429, wait and retry
+        if (detailRes.status === 429) {
+          console.log('Rate limited, waiting 60 seconds...')
+          await supabase.from('sync_status').update({
+            status: 'rate_limited',
+            updated_at: new Date().toISOString(),
+          }).eq('strava_athlete_id', stravaAthleteId)
+          await new Promise(r => setTimeout(r, 60000))
+          // Retry
+          const retryRes = await fetch(
+            `https://www.strava.com/api/v3/activities/${summary.id}`,
+            { headers: { Authorization: `Bearer ${accessToken}` } }
+          )
+          if (!retryRes.ok) {
+            console.error(`Retry failed for ${summary.id}: ${retryRes.status}`)
+            totalImported++
+            continue
+          }
+          const activity = await retryRes.json()
+          const record = buildActivityRecord(activity, stravaAthleteId)
+          await supabase.from('activities').insert(record)
+          await supabase.from('sync_status').update({
+            status: 'syncing',
+            updated_at: new Date().toISOString(),
+          }).eq('strava_athlete_id', stravaAthleteId)
+        } else if (!detailRes.ok) {
+          console.error(`Failed to fetch activity ${summary.id}: ${detailRes.status}`)
+        } else {
+          const activity = await detailRes.json()
+          const record = buildActivityRecord(activity, stravaAthleteId)
+          const { error } = await supabase.from('activities').insert(record)
+          if (error) {
+            console.error(`Failed to insert activity ${summary.id}:`, error)
+          }
         }
 
         totalImported++
@@ -230,7 +261,14 @@ async function handleSyncHistory(stravaAthleteId: number) {
           updated_at: new Date().toISOString(),
         }).eq('strava_athlete_id', stravaAthleteId)
 
-        await new Promise(r => setTimeout(r, 200))
+        // Throttle: 1 request per second to stay well under 100/15min limit
+        await new Promise(r => setTimeout(r, 1000))
+
+        // Extra pause every 80 requests to be safe
+        if (apiCalls % 80 === 0) {
+          console.log(`Pausing after ${apiCalls} API calls (15s cooldown)...`)
+          await new Promise(r => setTimeout(r, 15000))
+        }
       } catch (err) {
         console.error(`Error processing activity ${summary.id}:`, err)
         totalImported++
