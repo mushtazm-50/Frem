@@ -43,6 +43,7 @@ export function Goals() {
   const { goals, loading, addGoal, updateGoalStatus, deleteGoal, refreshGoal } = useGoals()
   const { activities } = useActivities()
   const [showForm, setShowForm] = useState(false)
+  const [showPreferences, setShowPreferences] = useState<string | null>(null) // goal ID awaiting preferences
   const [expandedWeek, setExpandedWeek] = useState<string | null>(null)
   const [generatingPlan, setGeneratingPlan] = useState<string | null>(null)
   const [adjustingPlan, setAdjustingPlan] = useState<string | null>(null)
@@ -83,8 +84,17 @@ export function Goals() {
     const goalId = await addGoal(goal)
     setShowForm(false)
     if (goalId) {
-      await handleGeneratePlan(goalId)
+      setShowPreferences(goalId)
     }
+  }
+
+  async function handlePreferencesSubmit(goalId: string, prefs: { sessions_per_week: number; preferred_days: string[]; experience_level: string; max_session_minutes: number; cross_training: boolean }) {
+    // Save preferences to goal
+    await supabase.from('goals').update({ training_preferences: prefs }).eq('id', goalId)
+    await refreshGoal(goalId)
+    setShowPreferences(null)
+    // Now generate plan
+    await handleGeneratePlan(goalId)
   }
 
   function getPaceTrend(goal: Goal) {
@@ -198,7 +208,18 @@ export function Goals() {
         />
       )}
 
-      {displayGoals.length === 0 && !showForm && (
+      {showPreferences && (
+        <PreferencesForm
+          onSubmit={(prefs) => handlePreferencesSubmit(showPreferences, prefs)}
+          onSkip={() => {
+            const goalId = showPreferences
+            setShowPreferences(null)
+            handleGeneratePlan(goalId)
+          }}
+        />
+      )}
+
+      {displayGoals.length === 0 && !showForm && !showPreferences && (
         <div className="text-center py-20">
           {tab === 'active' ? (
             <>
@@ -712,9 +733,152 @@ function NewGoalForm({ onSubmit, onCancel, recentActivities }: {
           disabled={submitting || !eventName || !targetDate || distanceMeters <= 0 || (totalSeconds <= 0 && calculatedTime <= 0)}
           className="px-5 py-2.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
         >
-          {submitting ? 'Creating & generating plan...' : 'Create Goal'}
+          {submitting ? 'Creating...' : 'Create Goal'}
         </button>
       </div>
     </form>
+  )
+}
+
+// --- Training Preferences Form ---
+
+const ALL_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
+function PreferencesForm({ onSubmit, onSkip }: {
+  onSubmit: (prefs: { sessions_per_week: number; preferred_days: string[]; experience_level: string; max_session_minutes: number; cross_training: boolean }) => void
+  onSkip: () => void
+}) {
+  const [sessionsPerWeek, setSessionsPerWeek] = useState(4)
+  const [preferredDays, setPreferredDays] = useState<string[]>(['Monday', 'Wednesday', 'Friday', 'Sunday'])
+  const [experience, setExperience] = useState<'beginner' | 'intermediate' | 'advanced'>('intermediate')
+  const [maxMinutes, setMaxMinutes] = useState(60)
+  const [crossTraining, setCrossTraining] = useState(true)
+
+  function toggleDay(day: string) {
+    setPreferredDays(prev =>
+      prev.includes(day) ? prev.filter(d => d !== day) : [...prev, day]
+    )
+  }
+
+  return (
+    <div className="bg-bg-surface rounded-xl p-6 border border-border-subtle space-y-6">
+      <div>
+        <h3 className="text-base font-semibold">Training Preferences</h3>
+        <p className="text-sm text-text-secondary mt-1">Help the AI coach build a plan that fits your schedule</p>
+      </div>
+
+      {/* Sessions per week */}
+      <div>
+        <label className="block text-xs text-text-tertiary uppercase tracking-wider font-medium mb-3">Sessions per week</label>
+        <div className="flex gap-2">
+          {[3, 4, 5, 6].map(n => (
+            <button
+              key={n}
+              type="button"
+              onClick={() => setSessionsPerWeek(n)}
+              className={`w-12 h-10 rounded-lg text-sm font-medium transition-colors ${
+                sessionsPerWeek === n ? 'bg-accent-muted text-accent border border-accent/30' : 'bg-bg-primary text-text-secondary border border-border-subtle hover:bg-bg-surface-hover'
+              }`}
+            >
+              {n}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Preferred days */}
+      <div>
+        <label className="block text-xs text-text-tertiary uppercase tracking-wider font-medium mb-3">Preferred training days</label>
+        <div className="flex gap-1.5">
+          {ALL_DAYS.map(day => (
+            <button
+              key={day}
+              type="button"
+              onClick={() => toggleDay(day)}
+              className={`w-10 h-10 rounded-lg text-xs font-medium transition-colors ${
+                preferredDays.includes(day) ? 'bg-accent-muted text-accent border border-accent/30' : 'bg-bg-primary text-text-tertiary border border-border-subtle hover:bg-bg-surface-hover'
+              }`}
+            >
+              {day.slice(0, 2)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Experience level */}
+      <div>
+        <label className="block text-xs text-text-tertiary uppercase tracking-wider font-medium mb-3">Experience level</label>
+        <div className="flex gap-2">
+          {(['beginner', 'intermediate', 'advanced'] as const).map(level => (
+            <button
+              key={level}
+              type="button"
+              onClick={() => setExperience(level)}
+              className={`px-4 py-2 rounded-lg text-sm font-medium capitalize transition-colors ${
+                experience === level ? 'bg-accent-muted text-accent border border-accent/30' : 'bg-bg-primary text-text-secondary border border-border-subtle hover:bg-bg-surface-hover'
+              }`}
+            >
+              {level}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Max session time */}
+      <div>
+        <label className="block text-xs text-text-tertiary uppercase tracking-wider font-medium mb-3">Max session time</label>
+        <div className="flex gap-2">
+          {[45, 60, 75, 90, 120].map(mins => (
+            <button
+              key={mins}
+              type="button"
+              onClick={() => setMaxMinutes(mins)}
+              className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                maxMinutes === mins ? 'bg-accent-muted text-accent border border-accent/30' : 'bg-bg-primary text-text-secondary border border-border-subtle hover:bg-bg-surface-hover'
+              }`}
+            >
+              {mins}min
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Cross training */}
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-medium">Include cross-training</p>
+          <p className="text-xs text-text-tertiary mt-0.5">Strength, cycling, swimming as supplementary sessions</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => setCrossTraining(!crossTraining)}
+          className={`w-11 h-6 rounded-full transition-colors relative ${crossTraining ? 'bg-accent' : 'bg-bg-primary border border-border-subtle'}`}
+        >
+          <div className={`w-4 h-4 rounded-full bg-white absolute top-1 transition-transform ${crossTraining ? 'translate-x-6' : 'translate-x-1'}`} />
+        </button>
+      </div>
+
+      <div className="flex justify-end gap-3 pt-2">
+        <button
+          type="button"
+          onClick={onSkip}
+          className="px-4 py-2 text-sm text-text-secondary hover:text-text-primary transition-colors"
+        >
+          Skip — use defaults
+        </button>
+        <button
+          onClick={() => onSubmit({
+            sessions_per_week: sessionsPerWeek,
+            preferred_days: preferredDays,
+            experience_level: experience,
+            max_session_minutes: maxMinutes,
+            cross_training: crossTraining,
+          })}
+          className="px-5 py-2.5 bg-accent hover:bg-accent-hover text-white rounded-lg text-sm font-medium transition-colors"
+        >
+          Generate Training Plan
+        </button>
+      </div>
+    </div>
   )
 }

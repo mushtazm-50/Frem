@@ -26,6 +26,14 @@ export interface Activity {
   created_at: string
 }
 
+export interface TrainingPreferences {
+  sessions_per_week: number
+  preferred_days: string[]
+  experience_level: 'beginner' | 'intermediate' | 'advanced'
+  max_session_minutes: number
+  cross_training: boolean
+}
+
 export interface Goal {
   id: string
   user_id: string
@@ -36,6 +44,7 @@ export interface Goal {
   target_time: number // seconds
   target_pace: number // seconds per km
   status: 'active' | 'completed' | 'cancelled'
+  training_preferences: TrainingPreferences | null
   training_plan: TrainingWeek[] | null
   created_at: string
 }

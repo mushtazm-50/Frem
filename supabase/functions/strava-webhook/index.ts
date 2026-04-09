@@ -539,6 +539,13 @@ GOAL:
 ATHLETE'S RECENT ACTIVITY (last 60 days):
 ${activitySummary || 'No recent activities recorded.'}
 
+TRAINING PREFERENCES:
+${goal.training_preferences ? `- Sessions per week: ${goal.training_preferences.sessions_per_week}
+- Preferred days: ${goal.training_preferences.preferred_days?.join(', ') || 'Any'}
+- Experience level: ${goal.training_preferences.experience_level || 'intermediate'}
+- Max session duration: ${goal.training_preferences.max_session_minutes || 60} minutes
+- Include cross-training: ${goal.training_preferences.cross_training ? 'Yes' : 'No'}` : 'No preferences set — use sensible defaults (4 sessions/week, intermediate level).'}
+
 Generate a ${Math.min(weeksUntil, 12)}-week training plan. For each week provide:
 - A focus/theme for the week
 - Daily sessions (Mon-Sun) with: day, session type, description, duration in minutes, intensity (easy/moderate/hard/recovery)

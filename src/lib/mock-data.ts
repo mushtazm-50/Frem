@@ -163,6 +163,7 @@ export const mockGoals: Goal[] = [
     target_distance: 21097.5,
     target_time: 5400, // 1:30:00
     target_pace: 256, // 4:16/km
+    training_preferences: { sessions_per_week: 5, preferred_days: ['Monday', 'Tuesday', 'Thursday', 'Saturday', 'Sunday'], experience_level: 'intermediate' as const, max_session_minutes: 90, cross_training: true },
     status: 'active',
     training_plan: [
       {
@@ -229,6 +230,7 @@ export const mockGoals: Goal[] = [
     target_distance: 160934, // 100 miles
     target_time: 18000, // 5:00:00
     target_pace: 112, // ~1:52/km
+    training_preferences: null,
     status: 'active',
     training_plan: null,
     created_at: '2026-03-15T10:00:00Z',

@@ -5,6 +5,7 @@ import { Dashboard } from './pages/Dashboard'
 import { ActivityDetail } from './pages/ActivityDetail'
 import { Activities } from './pages/Activities'
 import { Goals } from './pages/Goals'
+import { Coach } from './pages/Coach'
 import { Settings } from './pages/Settings'
 import { StravaCallback } from './pages/StravaCallback'
 
@@ -24,6 +25,7 @@ export default function App() {
           <Route path="/activities" element={<Activities />} />
           <Route path="/activity/:id" element={<ActivityDetail />} />
           <Route path="/goals" element={<Goals />} />
+          <Route path="/coach" element={<Coach />} />
           <Route path="/settings" element={<Settings />} />
         </Route>
       </Routes>

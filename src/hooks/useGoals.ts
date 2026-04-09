@@ -20,7 +20,7 @@ export function useGoals() {
     fetchGoals()
   }, [fetchGoals])
 
-  const addGoal = async (goal: Omit<Goal, 'id' | 'user_id' | 'created_at' | 'training_plan'>): Promise<string | null> => {
+  const addGoal = async (goal: Omit<Goal, 'id' | 'user_id' | 'created_at' | 'training_plan' | 'training_preferences'>): Promise<string | null> => {
     const { data: userData } = await supabase.auth.getUser()
     const userId = userData?.user?.id || 'unknown'
 
