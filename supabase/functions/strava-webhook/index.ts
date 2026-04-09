@@ -147,17 +147,43 @@ async function handleSyncHistory(stravaAthleteId: number) {
     // First pass: count total activities
     const allSummaries: Record<string, unknown>[] = []
     while (true) {
+      console.log(`Fetching activity list page ${page}...`)
       const res = await fetch(
         `https://www.strava.com/api/v3/athlete/activities?after=${oneYearAgo}&page=${page}&per_page=${perPage}`,
         { headers: { Authorization: `Bearer ${accessToken}` } }
       )
-      if (!res.ok) break
+      if (!res.ok) {
+        const errText = await res.text()
+        console.error(`Strava API error on list page ${page}: ${res.status} ${errText}`)
+        // If unauthorized, try refreshing token once
+        if (res.status === 401) {
+          console.log('Token expired during sync, attempting refresh...')
+          const newToken = await forceTokenRefresh(stravaAthleteId)
+          if (newToken) {
+            const retryRes = await fetch(
+              `https://www.strava.com/api/v3/athlete/activities?after=${oneYearAgo}&page=${page}&per_page=${perPage}`,
+              { headers: { Authorization: `Bearer ${newToken}` } }
+            )
+            if (retryRes.ok) {
+              const batch = await retryRes.json()
+              if (batch && batch.length > 0) {
+                allSummaries.push(...batch)
+                if (batch.length < perPage) break
+                page++
+                continue
+              }
+            }
+          }
+        }
+        break
+      }
       const batch = await res.json()
       if (!batch || batch.length === 0) break
       allSummaries.push(...batch)
       if (batch.length < perPage) break
       page++
     }
+    console.log(`Found ${allSummaries.length} activities from Strava API`)
 
     // Initialize progress
     await supabase.from('sync_status').upsert({
@@ -307,18 +333,41 @@ async function getAccessToken(stravaAthleteId: number): Promise<string> {
 
   if (!tokens) throw new Error('No tokens found for athlete')
 
-  if (tokens.expires_at < Math.floor(Date.now() / 1000)) {
+  // Always refresh if expired or about to expire (within 5 min)
+  if (tokens.expires_at < Math.floor(Date.now() / 1000) + 300) {
+    console.log('Refreshing Strava token...')
+    const refreshed = await refreshStravaToken(tokens.refresh_token, stravaAthleteId)
+    if (refreshed) return refreshed
+    // If refresh failed, try existing token anyway
+    console.warn('Token refresh failed, trying existing token')
+  }
+
+  return tokens.access_token
+}
+
+async function refreshStravaToken(refreshToken: string, stravaAthleteId: number): Promise<string | null> {
+  try {
     const res = await fetch('https://www.strava.com/oauth/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         client_id: STRAVA_CLIENT_ID,
         client_secret: STRAVA_CLIENT_SECRET,
-        refresh_token: tokens.refresh_token,
+        refresh_token: refreshToken,
         grant_type: 'refresh_token',
       }),
     })
+
+    if (!res.ok) {
+      console.error('Token refresh failed:', res.status, await res.text())
+      return null
+    }
+
     const refreshed = await res.json()
+    if (!refreshed.access_token) {
+      console.error('Token refresh returned no access_token:', JSON.stringify(refreshed))
+      return null
+    }
 
     await supabase.from('strava_tokens').update({
       access_token: refreshed.access_token,
@@ -326,10 +375,22 @@ async function getAccessToken(stravaAthleteId: number): Promise<string> {
       expires_at: refreshed.expires_at,
     }).eq('strava_athlete_id', stravaAthleteId)
 
+    console.log('Token refreshed successfully')
     return refreshed.access_token
+  } catch (err) {
+    console.error('Token refresh error:', err)
+    return null
   }
+}
 
-  return tokens.access_token
+async function forceTokenRefresh(stravaAthleteId: number): Promise<string | null> {
+  const { data: tokens } = await supabase
+    .from('strava_tokens')
+    .select('*')
+    .eq('strava_athlete_id', stravaAthleteId)
+    .single()
+  if (!tokens) return null
+  return refreshStravaToken(tokens.refresh_token, stravaAthleteId)
 }
 
 async function generateAnalysis(activity: Record<string, unknown>): Promise<string> {
