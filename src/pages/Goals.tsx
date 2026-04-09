@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react'
-import { Target, Plus, Calendar, ChevronDown, ChevronRight, X, Trophy, RefreshCw, Award, TrendingUp, TrendingDown, Minus, Ruler } from 'lucide-react'
+import { Target, Plus, Calendar, ChevronDown, ChevronRight, X, Trophy, RefreshCw, Award, TrendingUp, TrendingDown, Minus, Ruler, Trash2 } from 'lucide-react'
 import { useGoals } from '../hooks/useGoals'
 import { useActivities } from '../hooks/useActivities'
 import { ActivityTypeIcon } from '../components/ActivityTypeIcon'
@@ -40,7 +40,7 @@ function distanceLabel(meters: number): string {
 }
 
 export function Goals() {
-  const { goals, loading, addGoal, updateGoalStatus, refreshGoal } = useGoals()
+  const { goals, loading, addGoal, updateGoalStatus, deleteGoal, refreshGoal } = useGoals()
   const { activities } = useActivities()
   const [showForm, setShowForm] = useState(false)
   const [expandedWeek, setExpandedWeek] = useState<string | null>(null)
@@ -255,14 +255,26 @@ export function Goals() {
                       )}
                     </div>
                   </div>
-                  {goal.status === 'active' && (
+                  <div className="flex items-center gap-1 shrink-0">
+                    {goal.status === 'active' && (
+                      <button
+                        onClick={() => updateGoalStatus(goal.id, 'completed')}
+                        className="text-xs text-text-tertiary hover:text-success transition-colors px-2 py-1 rounded hover:bg-success/5 whitespace-nowrap"
+                      >
+                        Complete
+                      </button>
+                    )}
                     <button
-                      onClick={() => updateGoalStatus(goal.id, 'completed')}
-                      className="text-xs text-text-tertiary hover:text-success transition-colors px-2 py-1 rounded hover:bg-success/5 whitespace-nowrap"
+                      onClick={() => {
+                        if (confirm(`Delete "${goal.event_name}"? This cannot be undone.`)) {
+                          deleteGoal(goal.id)
+                        }
+                      }}
+                      className="text-text-tertiary hover:text-error transition-colors p-1.5 rounded hover:bg-error/5"
                     >
-                      Mark complete
+                      <Trash2 size={14} />
                     </button>
-                  )}
+                  </div>
                 </div>
 
                 {/* Target stats row */}

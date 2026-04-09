@@ -60,5 +60,16 @@ export function useGoals() {
     }
   }
 
-  return { goals, loading, addGoal, updateGoalStatus, refreshGoal }
+  const deleteGoal = async (goalId: string) => {
+    const { error } = await supabase
+      .from('goals')
+      .delete()
+      .eq('id', goalId)
+
+    if (!error) {
+      setGoals(prev => prev.filter(g => g.id !== goalId))
+    }
+  }
+
+  return { goals, loading, addGoal, updateGoalStatus, deleteGoal, refreshGoal }
 }
