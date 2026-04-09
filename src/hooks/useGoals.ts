@@ -1,54 +1,64 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import type { Goal } from '../types'
-import { mockGoals } from '../lib/mock-data'
 import { supabase } from '../lib/supabase'
-
-const USE_MOCK = !import.meta.env.VITE_SUPABASE_URL || import.meta.env.VITE_SUPABASE_URL === 'https://placeholder.supabase.co'
 
 export function useGoals() {
   const [goals, setGoals] = useState<Goal[]>([])
   const [loading, setLoading] = useState(true)
 
-  useEffect(() => {
-    if (USE_MOCK) {
-      setGoals(mockGoals)
-      setLoading(false)
-      return
-    }
+  const fetchGoals = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('goals')
+      .select('*')
+      .order('target_date', { ascending: true })
 
-    async function fetch() {
-      const { data, error } = await supabase
-        .from('goals')
-        .select('*')
-        .order('target_date', { ascending: true })
-
-      if (!error && data) setGoals(data)
-      setLoading(false)
-    }
-    fetch()
+    if (!error && data) setGoals(data)
+    setLoading(false)
   }, [])
 
-  const addGoal = async (goal: Omit<Goal, 'id' | 'user_id' | 'created_at' | 'training_plan'>) => {
-    if (USE_MOCK) {
-      const newGoal: Goal = {
-        ...goal,
-        id: crypto.randomUUID(),
-        user_id: 'user-1',
-        training_plan: null,
-        created_at: new Date().toISOString(),
-      }
-      setGoals(prev => [...prev, newGoal])
-      return
-    }
+  useEffect(() => {
+    fetchGoals()
+  }, [fetchGoals])
+
+  const addGoal = async (goal: Omit<Goal, 'id' | 'user_id' | 'created_at' | 'training_plan'>): Promise<string | null> => {
+    const { data: userData } = await supabase.auth.getUser()
+    const userId = userData?.user?.id || 'unknown'
 
     const { data, error } = await supabase
       .from('goals')
-      .insert(goal)
+      .insert({ ...goal, user_id: userId })
       .select()
       .single()
 
-    if (!error && data) setGoals(prev => [...prev, data])
+    if (!error && data) {
+      setGoals(prev => [...prev, data])
+      return data.id
+    }
+    return null
   }
 
-  return { goals, loading, addGoal }
+  const updateGoalStatus = async (goalId: string, status: 'active' | 'completed' | 'cancelled') => {
+    const { error } = await supabase
+      .from('goals')
+      .update({ status })
+      .eq('id', goalId)
+
+    if (!error) {
+      setGoals(prev => prev.map(g => g.id === goalId ? { ...g, status } : g))
+    }
+  }
+
+  const refreshGoal = async (goalId: string) => {
+    const { data } = await supabase
+      .from('goals')
+      .select('*')
+      .eq('id', goalId)
+      .single()
+
+    if (data) {
+      setGoals(prev => prev.map(g => g.id === goalId ? data : g))
+    }
+  }
+
+  return { goals, loading, addGoal, updateGoalStatus, refreshGoal }
 }

@@ -15,6 +15,7 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL') || ''
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || ''
 
 const CLAUDE_API_KEY = Deno.env.get('CLAUDE_API_KEY') || ''
+const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY') || ''
 const TELEGRAM_BOT_TOKEN = Deno.env.get('TELEGRAM_BOT_TOKEN') || ''
 const TELEGRAM_CHAT_ID = Deno.env.get('TELEGRAM_CHAT_ID') || ''
 const FREM_BASE_URL = Deno.env.get('FREM_BASE_URL') || ''
@@ -65,6 +66,14 @@ Deno.serve(async (req: Request) => {
 
   if (body.action === 'disconnect') {
     return handleDisconnect(body.strava_athlete_id)
+  }
+
+  if (body.action === 'generate_plan') {
+    return handleGeneratePlan(body.goal_id)
+  }
+
+  if (body.action === 'adjust_plan') {
+    return handleAdjustPlan(body.goal_id)
   }
 
   // Strava webhook event — new activity
@@ -431,6 +440,27 @@ async function forceTokenRefresh(stravaAthleteId: number): Promise<string | null
   return refreshStravaToken(tokens.refresh_token, stravaAthleteId)
 }
 
+// --- AI via Gemini ---
+async function callGemini(prompt: string): Promise<string> {
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.7, maxOutputTokens: 4096 },
+      }),
+    }
+  )
+  const result = await res.json()
+  if (!res.ok) {
+    console.error('Gemini API error:', JSON.stringify(result))
+    throw new Error('Gemini API call failed')
+  }
+  return result.candidates?.[0]?.content?.parts?.[0]?.text || ''
+}
+
 async function generateAnalysis(activity: Record<string, unknown>): Promise<string> {
   const prompt = `Analyze this ${activity.type} activity and provide a concise training analysis.
 
@@ -456,22 +486,201 @@ Provide analysis with these sections (use ## headers):
 
 Keep it concise and coaching-oriented. Use markdown formatting.`
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': CLAUDE_API_KEY,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1024,
-      messages: [{ role: 'user', content: prompt }],
-    }),
-  })
+  return callGemini(prompt)
+}
 
-  const result = await res.json()
-  return result.content[0].text
+// --- Plan Generation ---
+async function handleGeneratePlan(goalId: string) {
+  try {
+    // Fetch the goal
+    const { data: goal, error: goalErr } = await supabase
+      .from('goals')
+      .select('*')
+      .eq('id', goalId)
+      .single()
+    if (goalErr || !goal) return jsonResponse({ error: 'Goal not found' }, 404)
+
+    // Fetch recent activities (last 60 days) for context
+    const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString()
+    const { data: recentActivities } = await supabase
+      .from('activities')
+      .select('name, type, sport_type, start_date, distance, moving_time, average_speed, average_heartrate, total_elevation_gain')
+      .eq('user_id', goal.user_id)
+      .gte('start_date', sixtyDaysAgo)
+      .order('start_date', { ascending: false })
+      .limit(30)
+
+    const activitySummary = (recentActivities || []).map(a => {
+      const distKm = ((a.distance || 0) / 1000).toFixed(1)
+      const durMin = Math.round((a.moving_time || 0) / 60)
+      const paceSecPerKm = a.average_speed > 0 ? Math.round(1000 / a.average_speed) : 0
+      const paceMin = Math.floor(paceSecPerKm / 60)
+      const paceSec = paceSecPerKm % 60
+      return `- ${a.type}: ${distKm}km in ${durMin}min (${paceMin}:${String(paceSec).padStart(2, '0')}/km) HR:${a.average_heartrate || 'N/A'} on ${a.start_date?.slice(0, 10)}`
+    }).join('\n')
+
+    const weeksUntil = Math.max(1, Math.ceil((new Date(goal.target_date).getTime() - Date.now()) / (7 * 24 * 60 * 60 * 1000)))
+    const targetDurMin = Math.round(goal.target_time / 60)
+    const targetDurH = Math.floor(goal.target_time / 3600)
+    const targetDurM = Math.round((goal.target_time % 3600) / 60)
+    const targetTimeStr = targetDurH > 0 ? `${targetDurH}h ${targetDurM}min` : `${targetDurMin}min`
+
+    const prompt = `You are an expert running and endurance coach. Generate a training plan for the following goal.
+
+GOAL:
+- Event: ${goal.event_name}
+- Type: ${goal.event_type}
+- Target date: ${goal.target_date} (${weeksUntil} weeks away)
+- Target time: ${targetTimeStr}
+
+ATHLETE'S RECENT ACTIVITY (last 60 days):
+${activitySummary || 'No recent activities recorded.'}
+
+Generate a ${Math.min(weeksUntil, 12)}-week training plan. For each week provide:
+- A focus/theme for the week
+- Daily sessions (Mon-Sun) with: day, session type, description, duration in minutes, intensity (easy/moderate/hard/recovery)
+
+Be specific with paces, distances, and intensities. Taper in the final 1-2 weeks before the event.
+Base the plan on the athlete's current fitness level shown in recent activities.
+
+IMPORTANT: Respond ONLY with valid JSON in this exact format, no other text:
+{
+  "weeks": [
+    {
+      "week": 1,
+      "focus": "Base Building",
+      "sessions": [
+        {"day": "Monday", "type": "Easy Run", "description": "Easy aerobic run at 5:30-6:00/km", "duration_minutes": 45, "intensity": "easy"},
+        {"day": "Tuesday", "type": "Rest", "description": "Complete rest or light stretching", "duration_minutes": 0, "intensity": "recovery"}
+      ]
+    }
+  ]
+}`
+
+    console.log('Generating training plan for goal:', goal.event_name)
+    const response = await callGemini(prompt)
+
+    // Parse the JSON from the response
+    let plan
+    try {
+      // Extract JSON from potential markdown code blocks
+      const jsonMatch = response.match(/\{[\s\S]*\}/)
+      if (jsonMatch) {
+        plan = JSON.parse(jsonMatch[0])
+      } else {
+        throw new Error('No JSON found in response')
+      }
+    } catch (parseErr) {
+      console.error('Failed to parse plan JSON:', parseErr, 'Response:', response.slice(0, 500))
+      return jsonResponse({ error: 'Failed to parse training plan' }, 500)
+    }
+
+    // Store the plan in the goal
+    const { error: updateErr } = await supabase
+      .from('goals')
+      .update({ training_plan: plan.weeks })
+      .eq('id', goalId)
+
+    if (updateErr) {
+      console.error('Failed to update goal with plan:', updateErr)
+      return jsonResponse({ error: 'Failed to save plan' }, 500)
+    }
+
+    console.log(`Plan generated: ${plan.weeks.length} weeks for ${goal.event_name}`)
+    return jsonResponse({ success: true, weeks: plan.weeks.length })
+  } catch (err) {
+    console.error('Plan generation error:', err)
+    return jsonResponse({ error: (err as Error).message }, 500)
+  }
+}
+
+// --- Plan Adjustment ---
+async function handleAdjustPlan(goalId: string) {
+  try {
+    const { data: goal, error: goalErr } = await supabase
+      .from('goals')
+      .select('*')
+      .eq('id', goalId)
+      .single()
+    if (goalErr || !goal || !goal.training_plan) return jsonResponse({ error: 'Goal or plan not found' }, 404)
+
+    // Fetch activities since goal creation
+    const { data: activities } = await supabase
+      .from('activities')
+      .select('name, type, sport_type, start_date, distance, moving_time, average_speed, average_heartrate')
+      .eq('user_id', goal.user_id)
+      .gte('start_date', goal.created_at)
+      .order('start_date', { ascending: false })
+
+    const completedSummary = (activities || []).map(a => {
+      const distKm = ((a.distance || 0) / 1000).toFixed(1)
+      const durMin = Math.round((a.moving_time || 0) / 60)
+      return `- ${a.type}: ${distKm}km in ${durMin}min on ${a.start_date?.slice(0, 10)}`
+    }).join('\n')
+
+    const weeksUntil = Math.max(1, Math.ceil((new Date(goal.target_date).getTime() - Date.now()) / (7 * 24 * 60 * 60 * 1000)))
+    const targetDurH = Math.floor(goal.target_time / 3600)
+    const targetDurM = Math.round((goal.target_time % 3600) / 60)
+    const targetTimeStr = targetDurH > 0 ? `${targetDurH}h ${targetDurM}min` : `${targetDurM}min`
+
+    const prompt = `You are an expert endurance coach. The athlete has a training plan that needs adjusting based on what they've actually done.
+
+GOAL:
+- Event: ${goal.event_name} (${goal.event_type})
+- Target date: ${goal.target_date} (${weeksUntil} weeks away)
+- Target time: ${targetTimeStr}
+
+ORIGINAL PLAN:
+${JSON.stringify(goal.training_plan, null, 2)}
+
+ACTIVITIES ACTUALLY COMPLETED SINCE PLAN STARTED:
+${completedSummary || 'No activities recorded yet.'}
+
+Based on the gap between planned and actual training, generate an ADJUSTED plan for the remaining ${weeksUntil} weeks.
+- If the athlete missed sessions, gradually reintroduce load — don't try to make up for lost time
+- If the athlete exceeded the plan, consider advancing them
+- Keep the taper period before the event
+
+IMPORTANT: Respond ONLY with valid JSON in this exact format, no other text:
+{
+  "weeks": [
+    {
+      "week": 1,
+      "focus": "Week theme",
+      "sessions": [
+        {"day": "Monday", "type": "Session Type", "description": "Details", "duration_minutes": 45, "intensity": "easy"}
+      ]
+    }
+  ]
+}`
+
+    console.log('Adjusting plan for goal:', goal.event_name)
+    const response = await callGemini(prompt)
+
+    let plan
+    try {
+      const jsonMatch = response.match(/\{[\s\S]*\}/)
+      if (jsonMatch) {
+        plan = JSON.parse(jsonMatch[0])
+      } else {
+        throw new Error('No JSON found in response')
+      }
+    } catch (parseErr) {
+      console.error('Failed to parse adjusted plan:', parseErr)
+      return jsonResponse({ error: 'Failed to parse adjusted plan' }, 500)
+    }
+
+    await supabase
+      .from('goals')
+      .update({ training_plan: plan.weeks })
+      .eq('id', goalId)
+
+    console.log(`Plan adjusted: ${plan.weeks.length} weeks for ${goal.event_name}`)
+    return jsonResponse({ success: true, weeks: plan.weeks.length })
+  } catch (err) {
+    console.error('Plan adjustment error:', err)
+    return jsonResponse({ error: (err as Error).message }, 500)
+  }
 }
 
 async function sendTelegramNotification(

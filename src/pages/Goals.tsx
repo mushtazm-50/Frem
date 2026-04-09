@@ -1,17 +1,26 @@
 import { useState } from 'react'
-import { Target, Plus, Calendar, Clock, ChevronDown, ChevronRight, X } from 'lucide-react'
+import { Target, Plus, Calendar, Clock, ChevronDown, ChevronRight, X, Trophy, RefreshCw, Award } from 'lucide-react'
 import { useGoals } from '../hooks/useGoals'
+import { useActivities } from '../hooks/useActivities'
 import { ActivityTypeIcon } from '../components/ActivityTypeIcon'
-import { formatDuration } from '../lib/strava'
-import { format, differenceInDays } from 'date-fns'
+import { formatDuration, formatPace } from '../lib/strava'
+import { format, differenceInDays, differenceInWeeks } from 'date-fns'
+import { supabase } from '../lib/supabase'
 import type { ActivityType, TrainingWeek } from '../types'
 
 const activityTypes: ActivityType[] = ['Run', 'Ride', 'Swim', 'WeightTraining', 'Hike']
 
 export function Goals() {
-  const { goals, loading, addGoal } = useGoals()
+  const { goals, loading, addGoal, updateGoalStatus, refreshGoal } = useGoals()
+  const { activities } = useActivities()
   const [showForm, setShowForm] = useState(false)
   const [expandedWeek, setExpandedWeek] = useState<string | null>(null)
+  const [generatingPlan, setGeneratingPlan] = useState<string | null>(null)
+  const [adjustingPlan, setAdjustingPlan] = useState<string | null>(null)
+  const [tab, setTab] = useState<'active' | 'completed'>('active')
+
+  const activeGoals = goals.filter(g => g.status === 'active')
+  const completedGoals = goals.filter(g => g.status === 'completed')
 
   if (loading) {
     return (
@@ -20,6 +29,90 @@ export function Goals() {
       </div>
     )
   }
+
+  async function handleGeneratePlan(goalId: string) {
+    setGeneratingPlan(goalId)
+    try {
+      const { error } = await supabase.functions.invoke('strava-webhook', {
+        body: { action: 'generate_plan', goal_id: goalId },
+      })
+      if (error) throw error
+      await refreshGoal(goalId)
+    } catch (err) {
+      console.error('Failed to generate plan:', err)
+    }
+    setGeneratingPlan(null)
+  }
+
+  async function handleAdjustPlan(goalId: string) {
+    setAdjustingPlan(goalId)
+    try {
+      const { error } = await supabase.functions.invoke('strava-webhook', {
+        body: { action: 'adjust_plan', goal_id: goalId },
+      })
+      if (error) throw error
+      await refreshGoal(goalId)
+    } catch (err) {
+      console.error('Failed to adjust plan:', err)
+    }
+    setAdjustingPlan(null)
+  }
+
+  async function handleCreateGoal(goal: { event_type: ActivityType; event_name: string; target_date: string; target_time: number; status: 'active' }) {
+    const goalId = await addGoal(goal)
+    setShowForm(false)
+    if (goalId) {
+      await handleGeneratePlan(goalId)
+    }
+  }
+
+  function getProgressForGoal(goal: typeof goals[0]) {
+    // Get recent activities matching the goal type
+    const relevant = activities
+      .filter(a => a.type === goal.event_type)
+      .sort((a, b) => new Date(b.start_date).getTime() - new Date(a.start_date).getTime())
+      .slice(0, 10)
+
+    if (relevant.length === 0) return null
+
+    const avgSpeed = relevant.reduce((s, a) => s + a.average_speed, 0) / relevant.length
+    const avgHr = relevant.filter(a => a.average_heartrate).reduce((s, a) => s + (a.average_heartrate || 0), 0) / (relevant.filter(a => a.average_heartrate).length || 1)
+
+    // Calculate target pace from goal
+    const goalDistance = relevant[0]?.distance || 0 // approximate from recent
+    const targetSpeed = goalDistance > 0 ? goalDistance / goal.target_time : 0
+
+    return {
+      currentPace: avgSpeed,
+      targetPace: targetSpeed,
+      avgHr: Math.round(avgHr),
+      recentCount: relevant.length,
+      type: goal.event_type,
+    }
+  }
+
+  function getWeeklyCompliance(goal: typeof goals[0]) {
+    if (!goal.training_plan) return null
+    const now = new Date()
+    const weeksSinceCreation = differenceInWeeks(now, new Date(goal.created_at))
+    const currentWeekIndex = Math.min(weeksSinceCreation, (goal.training_plan as TrainingWeek[]).length - 1)
+    const currentWeek = (goal.training_plan as TrainingWeek[])[currentWeekIndex]
+    if (!currentWeek) return null
+
+    const plannedSessions = currentWeek.sessions.filter(s => s.duration_minutes > 0).length
+    // Count actual activities this week matching the goal type
+    const weekStart = new Date(now)
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay() + 1)
+    const thisWeekActivities = activities.filter(a =>
+      a.type === goal.event_type &&
+      new Date(a.start_date) >= weekStart &&
+      new Date(a.start_date) <= now
+    ).length
+
+    return { planned: plannedSessions, completed: thisWeekActivities }
+  }
+
+  const displayGoals = tab === 'active' ? activeGoals : completedGoals
 
   return (
     <div className="space-y-8">
@@ -37,117 +130,219 @@ export function Goals() {
         </button>
       </div>
 
+      {/* Tabs */}
+      <div className="flex gap-1 bg-bg-surface rounded-lg p-1 w-fit">
+        <button
+          onClick={() => setTab('active')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+            tab === 'active' ? 'bg-bg-primary text-text-primary' : 'text-text-tertiary hover:text-text-secondary'
+          }`}
+        >
+          <Target size={15} />
+          Active
+          {activeGoals.length > 0 && (
+            <span className="text-xs bg-accent-muted text-accent px-1.5 py-0.5 rounded-full">{activeGoals.length}</span>
+          )}
+        </button>
+        <button
+          onClick={() => setTab('completed')}
+          className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+            tab === 'completed' ? 'bg-bg-primary text-text-primary' : 'text-text-tertiary hover:text-text-secondary'
+          }`}
+        >
+          <Trophy size={15} />
+          Completed
+          {completedGoals.length > 0 && (
+            <span className="text-xs bg-success/15 text-success px-1.5 py-0.5 rounded-full">{completedGoals.length}</span>
+          )}
+        </button>
+      </div>
+
       {showForm && (
         <NewGoalForm
-          onSubmit={async (goal) => {
-            await addGoal(goal)
-            setShowForm(false)
-          }}
+          onSubmit={handleCreateGoal}
           onCancel={() => setShowForm(false)}
         />
       )}
 
-      {goals.length === 0 && !showForm && (
+      {displayGoals.length === 0 && !showForm && (
         <div className="text-center py-20">
-          <Target size={40} className="text-text-tertiary mx-auto mb-3" />
-          <p className="text-text-secondary">No goals yet</p>
-          <p className="text-text-tertiary text-sm mt-1">Create your first goal to get started</p>
+          {tab === 'active' ? (
+            <>
+              <Target size={40} className="text-text-tertiary mx-auto mb-3" />
+              <p className="text-text-secondary">No active goals</p>
+              <p className="text-text-tertiary text-sm mt-1">Create a goal to get a personalized training plan</p>
+            </>
+          ) : (
+            <>
+              <Trophy size={40} className="text-text-tertiary mx-auto mb-3" />
+              <p className="text-text-secondary">No completed goals yet</p>
+              <p className="text-text-tertiary text-sm mt-1">Completed goals will appear here</p>
+            </>
+          )}
         </div>
       )}
 
       <div className="space-y-6">
-        {goals.map(goal => (
-          <div key={goal.id} className="bg-bg-surface rounded-xl border border-border-subtle overflow-hidden">
-            <div className="p-6">
-              <div className="flex items-start gap-4">
-                <div className="w-10 h-10 rounded-lg bg-accent-muted flex items-center justify-center shrink-0">
-                  <ActivityTypeIcon type={goal.event_type} size={20} className="text-accent" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-lg font-semibold">{goal.event_name}</h3>
-                    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-                      goal.status === 'active' ? 'bg-accent-muted text-accent' :
-                      goal.status === 'completed' ? 'bg-success/15 text-success' :
-                      'bg-bg-primary text-text-tertiary'
-                    }`}>
-                      {goal.status}
-                    </span>
+        {displayGoals.map(goal => {
+          const progress = getProgressForGoal(goal)
+          const compliance = getWeeklyCompliance(goal)
+          const daysLeft = differenceInDays(new Date(goal.target_date), new Date())
+          const isGenerating = generatingPlan === goal.id
+          const isAdjusting = adjustingPlan === goal.id
+
+          return (
+            <div key={goal.id} className="bg-bg-surface rounded-xl border border-border-subtle overflow-hidden">
+              <div className="p-6">
+                <div className="flex items-start gap-4">
+                  <div className="w-10 h-10 rounded-lg bg-accent-muted flex items-center justify-center shrink-0">
+                    <ActivityTypeIcon type={goal.event_type} size={20} className="text-accent" />
                   </div>
-                  <div className="flex items-center gap-4 mt-2 text-sm text-text-secondary">
-                    <span className="inline-flex items-center gap-1.5">
-                      <Calendar size={14} />
-                      {format(new Date(goal.target_date), 'MMM d, yyyy')}
-                    </span>
-                    <span className="inline-flex items-center gap-1.5">
-                      <Clock size={14} />
-                      Target: {formatDuration(goal.target_time)}
-                    </span>
-                    {goal.status === 'active' && (
-                      <span className="text-text-tertiary">
-                        {differenceInDays(new Date(goal.target_date), new Date())} days to go
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-lg font-semibold">{goal.event_name}</h3>
+                      {goal.status === 'completed' && (
+                        <Award size={18} className="text-success" />
+                      )}
+                    </div>
+                    <div className="flex items-center gap-4 mt-2 text-sm text-text-secondary">
+                      <span className="inline-flex items-center gap-1.5">
+                        <Calendar size={14} />
+                        {format(new Date(goal.target_date), 'MMM d, yyyy')}
                       </span>
+                      <span className="inline-flex items-center gap-1.5">
+                        <Clock size={14} />
+                        Target: {formatDuration(goal.target_time)}
+                      </span>
+                      {goal.status === 'active' && daysLeft > 0 && (
+                        <span className="text-text-tertiary">{daysLeft} days to go</span>
+                      )}
+                    </div>
+                  </div>
+                  {goal.status === 'active' && (
+                    <button
+                      onClick={() => updateGoalStatus(goal.id, 'completed')}
+                      className="text-xs text-text-tertiary hover:text-success transition-colors px-2 py-1 rounded hover:bg-success/5"
+                    >
+                      Mark complete
+                    </button>
+                  )}
+                </div>
+
+                {/* Progress from real data */}
+                {goal.status === 'active' && progress && (
+                  <div className="mt-5 pt-5 border-t border-border-subtle grid grid-cols-2 gap-4">
+                    <div>
+                      <p className="text-xs text-text-tertiary uppercase tracking-wider font-medium mb-1">Current Avg Pace</p>
+                      <p className="text-lg font-mono font-semibold">
+                        {formatPace(progress.currentPace, progress.type)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-text-tertiary uppercase tracking-wider font-medium mb-1">Target Pace</p>
+                      <p className="text-lg font-mono font-semibold text-accent">
+                        {progress.targetPace > 0 ? formatPace(progress.targetPace, progress.type) : formatDuration(goal.target_time)}
+                      </p>
+                    </div>
+                    {compliance && (
+                      <div className="col-span-2">
+                        <p className="text-xs text-text-tertiary uppercase tracking-wider font-medium mb-1">This Week</p>
+                        <p className="text-sm text-text-secondary">
+                          <span className="text-text-primary font-medium">{compliance.completed}</span> of {compliance.planned} planned sessions completed
+                        </p>
+                      </div>
                     )}
                   </div>
-                </div>
+                )}
+
+                {/* Progress bar */}
+                {goal.status === 'active' && daysLeft > 0 && (
+                  <div className="mt-4">
+                    <div className="w-full bg-bg-primary rounded-full h-1.5">
+                      <div
+                        className="bg-accent rounded-full h-1.5 transition-all"
+                        style={{
+                          width: `${Math.min(100, Math.max(3, ((differenceInDays(new Date(), new Date(goal.created_at))) / differenceInDays(new Date(goal.target_date), new Date(goal.created_at))) * 100))}%`
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
 
-              {/* Progress bar */}
-              {goal.status === 'active' && (
-                <div className="mt-4">
-                  <div className="w-full bg-bg-primary rounded-full h-1.5">
-                    <div
-                      className="bg-accent rounded-full h-1.5 transition-all"
-                      style={{
-                        width: `${Math.min(100, Math.max(3, ((differenceInDays(new Date(), new Date(goal.created_at))) / differenceInDays(new Date(goal.target_date), new Date(goal.created_at))) * 100))}%`
-                      }}
-                    />
+              {/* Training Plan */}
+              {goal.training_plan && (goal.training_plan as TrainingWeek[]).length > 0 && (
+                <div className="border-t border-border-subtle">
+                  <div className="px-6 py-3 flex items-center justify-between">
+                    <p className="text-xs text-text-tertiary uppercase tracking-wider font-medium">
+                      Training Plan — {(goal.training_plan as TrainingWeek[]).length} weeks
+                    </p>
+                    {goal.status === 'active' && (
+                      <button
+                        onClick={() => handleAdjustPlan(goal.id)}
+                        disabled={isAdjusting}
+                        className="inline-flex items-center gap-1.5 text-xs text-accent hover:text-accent-hover transition-colors disabled:opacity-50"
+                      >
+                        <RefreshCw size={12} className={isAdjusting ? 'animate-spin' : ''} />
+                        {isAdjusting ? 'Adjusting...' : 'Adjust Plan'}
+                      </button>
+                    )}
+                  </div>
+                  {(goal.training_plan as TrainingWeek[]).map((week) => {
+                    const weekKey = `${goal.id}-${week.week}`
+                    const isExpanded = expandedWeek === weekKey
+                    return (
+                      <div key={weekKey} className="border-t border-border-subtle">
+                        <button
+                          onClick={() => setExpandedWeek(isExpanded ? null : weekKey)}
+                          className="w-full flex items-center justify-between px-6 py-3.5 hover:bg-bg-surface-hover transition-colors text-left"
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs font-mono font-semibold text-accent bg-accent-muted w-7 h-7 rounded-md flex items-center justify-center">
+                              W{week.week}
+                            </span>
+                            <span className="text-sm font-medium">{week.focus}</span>
+                          </div>
+                          {isExpanded ? <ChevronDown size={16} className="text-text-tertiary" /> : <ChevronRight size={16} className="text-text-tertiary" />}
+                        </button>
+                        {isExpanded && <WeekSchedule week={week} />}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+
+              {/* Generate plan button */}
+              {!goal.training_plan && goal.status === 'active' && (
+                <div className="border-t border-border-subtle px-6 py-4">
+                  <button
+                    onClick={() => handleGeneratePlan(goal.id)}
+                    disabled={isGenerating}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 bg-accent hover:bg-accent-hover disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
+                  >
+                    {isGenerating ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        Generating plan...
+                      </>
+                    ) : (
+                      'Generate Training Plan'
+                    )}
+                  </button>
+                </div>
+              )}
+
+              {isGenerating && goal.training_plan === null && (
+                <div className="border-t border-border-subtle px-6 py-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-4 h-4 border-2 border-accent border-t-transparent rounded-full animate-spin" />
+                    <p className="text-sm text-text-secondary">Analyzing your recent training and generating a personalized plan...</p>
                   </div>
                 </div>
               )}
             </div>
-
-            {/* Training Plan */}
-            {goal.training_plan && goal.training_plan.length > 0 && (
-              <div className="border-t border-border-subtle">
-                <div className="px-6 py-3">
-                  <p className="text-xs text-text-tertiary uppercase tracking-wider font-medium">4-Week Training Plan</p>
-                </div>
-                {goal.training_plan.map((week) => {
-                  const weekKey = `${goal.id}-${week.week}`
-                  const isExpanded = expandedWeek === weekKey
-                  return (
-                    <div key={weekKey} className="border-t border-border-subtle">
-                      <button
-                        onClick={() => setExpandedWeek(isExpanded ? null : weekKey)}
-                        className="w-full flex items-center justify-between px-6 py-3.5 hover:bg-bg-surface-hover transition-colors text-left"
-                      >
-                        <div className="flex items-center gap-3">
-                          <span className="text-xs font-mono font-semibold text-accent bg-accent-muted w-7 h-7 rounded-md flex items-center justify-center">
-                            W{week.week}
-                          </span>
-                          <span className="text-sm font-medium">{week.focus}</span>
-                        </div>
-                        {isExpanded ? <ChevronDown size={16} className="text-text-tertiary" /> : <ChevronRight size={16} className="text-text-tertiary" />}
-                      </button>
-                      {isExpanded && (
-                        <WeekSchedule week={week} />
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-
-            {goal.training_plan === null && goal.status === 'active' && (
-              <div className="border-t border-border-subtle px-6 py-4">
-                <p className="text-sm text-text-tertiary">
-                  Training plan will be generated when connected to the backend.
-                </p>
-              </div>
-            )}
-          </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )
@@ -169,7 +364,7 @@ function WeekSchedule({ week }: { week: TrainingWeek }) {
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               <span className="text-sm font-medium">{session.type}</span>
-              <span className={`text-xs font-medium ${intensityColors[session.intensity]}`}>
+              <span className={`text-xs font-medium ${intensityColors[session.intensity] || 'text-text-tertiary'}`}>
                 {session.intensity}
               </span>
               {session.duration_minutes > 0 && (
